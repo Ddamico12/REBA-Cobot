@@ -1,0 +1,53 @@
+conveyor_handoff_place:
+  taken_wait_s: 0.3
+  grab_delay_s: 0.8
+  num_small_boxes: 3
+  velocity_scale: 0.9
+  accel_scale: 0.9
+  gripper_speed: 255.0
+  start_threshold_cm: 30.0
+  middle_threshold_cm: 30.0
+  debounce_n: 2
+  sensor2_timeout_s: 5.0
+  wait_pick_joints:
+  - 1.079665
+  - -0.23026
+  - 0.646459
+  - -1.015864
+  - -0.644547
+  - 0.50373
+  pre_handoff_joints:
+  - 1.080966
+  - -0.393514
+  - 0.643288
+  - -0.828007
+  - -0.613193
+  - 0.502935
+  handoff_joints:
+  - 1.686968
+  - -0.377121
+  - 0.487996
+  - -0.240024
+  - 1.65685
+  - 0.004234
+  mid_joints:
+  - 1.096574
+  - -1.214178
+  - -0.154991
+  - -0.236055
+  - 0.2119
+  - 1.48333
+  place_joints:
+  - -1.274099
+  - -1.426008
+  - -0.148157
+  - -2.441731
+  - -0.26895
+  - 4.006493
+  post_place_joints:
+  - -1.095089
+  - -1.477784
+  - -0.158871
+  - -2.81087
+  - -1.502698
+  - 4.42271

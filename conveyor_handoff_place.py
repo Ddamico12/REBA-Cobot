@@ -3,11 +3,17 @@
 conveyor_handoff_place.py
 
 Repeating conveyor cycle:
-  Phase 1 — Pick 3 small boxes one at a time and hand each to a human
+  Phase 1 — Pick N small boxes one at a time and hand each to a human
   Phase 2 — Pick 1 large box and place it on a shelf
   Repeat
 
-Conveyor order (right -> left): Box -> Sensor 1 -> Sensor 2 -> Robot
+Waypoints (taught joints):
+  - wait_pick_joints
+  - pre_handoff_joints  (NEW: between wait_pick and handoff)
+  - handoff_joints
+  - mid_joints
+  - place_joints
+  - post_place_joints   (NEW: between place and home)
 
 Sensor gating:
   - Sensor 1 tells the robot to move to WAIT/PICK position
@@ -15,13 +21,13 @@ Sensor gating:
   - Gripper CLOSE happens only when Sensor 2 triggers
 
 "Taken" detection at handoff is a simple sleep timer for now,
-isolated in wait_until_taken() so it can be replaced with gripper
-feedback detection later.
+isolated in wait_until_taken() so it can be replaced later.
 
 RUN
 ---
 chmod +x conveyor_handoff_place.py
 source ~/main_workspace/catkin_ws/devel/setup.bash
+rosparam load /path/to/conveyor_joints.yaml
 rosrun ur3e_moveit_config conveyor_handoff_place.py
 """
 
@@ -85,15 +91,14 @@ class ConveyorHandoffPlace:
         self.gripper_force_close = float(rospy.get_param("~gripper_force_close", 75.0))
         self.gripper_force_open = float(rospy.get_param("~gripper_force_open", 50.0))
 
-        # ---------- Joint targets (placeholders — set via rosparam) ----------
-        self.wait_pick_joints = rospy.get_param(
-            "~wait_pick_joints", [0, -1.57, 0, -1.57, 0, 0])
-        self.handoff_joints = rospy.get_param(
-            "~handoff_joints", [0, -1.57, 0, -1.57, 0, 0])
-        self.mid_joints = rospy.get_param(
-            "~mid_joints", [0, -1.57, 0, -1.57, 0, 0])
-        self.place_joints = rospy.get_param(
-            "~place_joints", [0, -1.57, 0, -1.57, 0, 0])
+        # ---------- Joint targets (set via rosparam/YAML) ----------
+        self.wait_pick_joints = rospy.get_param("~wait_pick_joints", [0, -1.57, 0, -1.57, 0, 0])
+        self.pre_handoff_joints = rospy.get_param("~pre_handoff_joints", self.wait_pick_joints)  # NEW
+        self.handoff_joints = rospy.get_param("~handoff_joints", [0, -1.57, 0, -1.57, 0, 0])
+
+        self.mid_joints = rospy.get_param("~mid_joints", [0, -1.57, 0, -1.57, 0, 0])
+        self.place_joints = rospy.get_param("~place_joints", [0, -1.57, 0, -1.57, 0, 0])
+        self.post_place_joints = rospy.get_param("~post_place_joints", self.place_joints)  # NEW
 
         # ---------- Debouncers ----------
         self.db1 = Debounce(self.debounce_n)
@@ -111,16 +116,15 @@ class ConveyorHandoffPlace:
 
         # ---------- Gripper action client ----------
         self.gripper_ac = actionlib.SimpleActionClient(
-            "/command_robotiq_action", CommandRobotiqGripperAction)
+            "/command_robotiq_action", CommandRobotiqGripperAction
+        )
         rospy.loginfo("[cycle] Waiting for gripper action server...")
         self.gripper_ac.wait_for_server()
         rospy.loginfo("[cycle] Gripper action server connected.")
 
         # ---------- Ultrasonic subscribers ----------
-        rospy.Subscriber("/ultrasonic_distance_start", Float32,
-                         self._cb_sensor1, queue_size=50)
-        rospy.Subscriber("/ultrasonic_distance_middle", Float32,
-                         self._cb_sensor2, queue_size=50)
+        rospy.Subscriber("/ultrasonic_distance_start", Float32, self._cb_sensor1, queue_size=50)
+        rospy.Subscriber("/ultrasonic_distance_middle", Float32, self._cb_sensor2, queue_size=50)
 
         rospy.loginfo("[cycle] Node initialized.")
 
@@ -144,7 +148,7 @@ class ConveyorHandoffPlace:
         self.group.set_start_state_to_current_state()
         ok = self.group.go(list(joints), wait=True)
         self.group.stop()
-        rospy.sleep(0.15)
+        rospy.sleep(0.05)  # slightly snappier than 0.15
         return bool(ok)
 
     def go_home(self):
@@ -152,7 +156,7 @@ class ConveyorHandoffPlace:
         self.group.set_named_target("home")
         ok = self.group.go(wait=True)
         self.group.stop()
-        rospy.sleep(0.15)
+        rospy.sleep(0.05)
         return bool(ok)
 
     # ----------------------------------------------------------------
@@ -162,6 +166,7 @@ class ConveyorHandoffPlace:
         """open_ratio: 0.0 = closed, 1.0 = fully open."""
         if force is None:
             force = self.gripper_force_open if open_ratio > 0.5 else self.gripper_force_close
+
         r = max(0.0, min(1.0, float(open_ratio)))
         goal = CommandRobotiqGripperGoal()
         goal.position = r * 255.0
@@ -216,12 +221,6 @@ class ConveyorHandoffPlace:
     #  Taken placeholder
     # ----------------------------------------------------------------
     def wait_until_taken(self):
-        """Wait for the human to take the box from the gripper.
-
-        Currently a simple sleep timer.
-        # TODO: Replace with gripper feedback detection (position change)
-        #       for reliable taken sensing.
-        """
         rospy.loginfo("[cycle] Waiting %.1f s for human to take box...", self.taken_wait_s)
         rospy.sleep(self.taken_wait_s)
 
@@ -235,16 +234,14 @@ class ConveyorHandoffPlace:
         self.set_gripper(1.0, force=self.gripper_force_open)
 
         while not rospy.is_shutdown():
-            rospy.loginfo("[cycle] ===== New cycle: %d handoffs + 1 placement =====",
-                          self.num_small_boxes)
+            rospy.loginfo("[cycle] ===== New cycle: %d handoffs + 1 placement =====", self.num_small_boxes)
 
             # ============================================================
             #  PHASE 1: Small boxes — pick and hand off (x num_small_boxes)
             # ============================================================
             box_count = 0
             while box_count < self.num_small_boxes and not rospy.is_shutdown():
-                rospy.loginfo("[cycle] --- Small box %d/%d ---",
-                              box_count + 1, self.num_small_boxes)
+                rospy.loginfo("[cycle] --- Small box %d/%d ---", box_count + 1, self.num_small_boxes)
 
                 # Sensor 1 → move to wait/pick
                 rospy.loginfo("[cycle] Waiting for Sensor 1...")
@@ -257,14 +254,18 @@ class ConveyorHandoffPlace:
                 rospy.loginfo("[cycle] Waiting for Sensor 2 (armed)...")
                 if not self.wait_for_sensor2():
                     rospy.logwarn("[cycle] Sensor 2 timed out, re-waiting Sensor 1 for this box")
-                    continue  # retry same box_count
+                    continue
 
                 if self.grab_delay_s > 0:
                     rospy.sleep(self.grab_delay_s)
+
                 rospy.loginfo("[cycle] Sensor 2 triggered -> closing gripper")
                 self.set_gripper(0.0, force=self.gripper_force_close)
 
-                # Move to handoff
+                # Move to handoff via NEW mid waypoint
+                rospy.loginfo("[cycle] Moving to PRE-HANDOFF (mid waypoint)")
+                self.go_joints(self.pre_handoff_joints)
+
                 rospy.loginfo("[cycle] Moving to HANDOFF position")
                 self.go_joints(self.handoff_joints)
 
@@ -301,7 +302,7 @@ class ConveyorHandoffPlace:
             rospy.loginfo("[cycle] Sensor 1 triggered -> moving to WAIT/PICK")
             self.go_joints(self.wait_pick_joints)
 
-            # Sensor 2 (gated) → close gripper
+            # Sensor 2 (gated) → close gripper (with retry)
             rospy.loginfo("[cycle] Waiting for Sensor 2 (armed)...")
             while not rospy.is_shutdown():
                 if self.wait_for_sensor2():
@@ -316,12 +317,14 @@ class ConveyorHandoffPlace:
 
             if self.grab_delay_s > 0:
                 rospy.sleep(self.grab_delay_s)
+
             rospy.loginfo("[cycle] Sensor 2 triggered -> closing gripper")
             self.set_gripper(0.0, force=self.gripper_force_close)
 
             # Move to mid, then place
             rospy.loginfo("[cycle] Moving to MID position")
             self.go_joints(self.mid_joints)
+
             rospy.loginfo("[cycle] Moving to PLACE position")
             self.go_joints(self.place_joints)
 
@@ -329,7 +332,10 @@ class ConveyorHandoffPlace:
             rospy.loginfo("[cycle] Opening gripper to release")
             self.set_gripper(1.0, force=self.gripper_force_open)
 
-            # Return home
+            # NEW: retreat via post-place waypoint before HOME
+            rospy.loginfo("[cycle] Moving to POST-PLACE (mid waypoint)")
+            self.go_joints(self.post_place_joints)
+
             rospy.loginfo("[cycle] Returning HOME")
             self.go_home()
 
